@@ -1,12 +1,12 @@
 <?php
 
-require_once('../semantria/session.php');
+require_once('semantria/session.php');
 
 echo "Semantria service demo ...", "\r\n";
 
-// the consumer key and secret
-define('CONSUMER_KEY', "");
-define('CONSUMER_SECRET', "");
+// The consumer key and secret
+define('CONSUMER_KEY', getenv("SEMANTRIA_KEY"));
+define('CONSUMER_SECRET', getenv("SEMANTRIA_SECRET"));
 
 // Task statuses
 define('TASK_STATUS_UNDEFINED', 'UNDEFINED');
@@ -68,7 +68,7 @@ $subscription = $session->getSubscription();
 $tracker = array();
 $documets = array();
 
-print("Reading collection from file...\n");
+print("Reading documents from file...\n");
 $file = fopen("source.txt", "r");
 if (!$file) {
     print("");
@@ -92,7 +92,7 @@ foreach ($initialTexts as $text) {
     $documents[] = array('id' => $doc_id, 'text' => $text);
     $tracker[$doc_id] = TASK_STATUS_QUEUED;
     
-    if (count($documents) == $subscription['basic_settings']['batch_limit']) {
+    if (count($documents) == $subscription['basic_settings']['incoming_batch_limit']) {
         $docsCount = count($documents);
         $res = $session->queueBatch($documents);
         if ($res == 200 || $res == 202) {
@@ -142,16 +142,16 @@ foreach ($results as $data) {
     echo "Document ", $data["id"], " Sentiment score: ", $data["sentiment_score"], "\r\n";
 
     // Printing of document themes
-    echo "Document themes:", "\r\n";
-    if ($data["themes"]) {
+    if (isset($data["themes"])) {
+        echo "Document themes:", "\r\n";
         foreach ($data["themes"] as $theme) {
             echo "	", $theme["title"], " (sentiment: ", $theme["sentiment_score"], ")", "\r\n";
         }
     }
 
     // Printing of document entities
-    echo "Entities:", "\r\n";
     if (isset($data["entities"])) {
+        echo "Entities:", "\r\n";
         foreach ($data["entities"] as $entity) {
             echo "	", $entity["title"], " : ", $entity["entity_type"], " (sentiment: ", $entity["sentiment_score"], ")", "\r\n";
         }

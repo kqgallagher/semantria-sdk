@@ -138,7 +138,7 @@
 				log("<div style='margin-left: 30px;'/>No entities were extracted for this text");
 			}
 			
-			// Printing of document entities
+			// Printing of query topics
 			log("<div style='margin-left: 15px;'/>Topics:");
 			if (data.topics) {
 				for(var j=0, topic; topic=data.topics[j]; j++) {
@@ -218,14 +218,14 @@
 		var outgoingBatch = [];
 		for(var i=0, item; item=initialTexts[i]; i++) {
 			// Creates a sample document which need to be processed on Semantria
-			var id = Math.floor(Math.random() * 10000000);
+			var id = Math.floor(Math.random() * 10000000).toString();
 			outgoingBatch.push({
 				id: id,
 				text: item
 			});
 			docsTracker[id] = false;
 			
-			if (outgoingBatch.length == subscription.basic_settings.batch_limit) {
+			if (outgoingBatch.length == subscription.basic_settings.incoming_batch_limit) {
 				// Queues document for processing on Semantria service
 				// Check status from Semantria service
 				if (SemantriaActiveSession.queueBatchOfDocuments(outgoingBatch) == 202) {

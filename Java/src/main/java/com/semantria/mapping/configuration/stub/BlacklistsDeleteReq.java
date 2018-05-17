@@ -1,7 +1,6 @@
 package com.semantria.mapping.configuration.stub;
 
 import com.semantria.mapping.configuration.BlacklistItem;
-import com.semantria.mapping.configuration.Category;
 
 import javax.xml.bind.annotation.XmlElement;
 import javax.xml.bind.annotation.XmlRootElement;
@@ -9,7 +8,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 @XmlRootElement(name="blacklist")
-public final class BlacklistsDeleteReq
+public class BlacklistsDeleteReq
 {
     private List<String> blacklist = new ArrayList<String>();
 

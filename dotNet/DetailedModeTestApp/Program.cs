@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 
 using Semantria.Com;
-using Semantria.Com.Serializers;
 using Semantria.Com.Mapping;
 using Semantria.Com.Mapping.Output;
 
@@ -15,11 +14,13 @@ namespace DetailedModeTestApp
     {
         static void Main(string[] args)
         {
-            // Use correct Semantria API credentias here
-            string consumerKey = "";
-            string consumerSecret = "";
+            // Set environment vars before calling this program
+            // or edit this file and put your key and secret here.
+            string consumerKey = Environment.GetEnvironmentVariable("SEMANTRIA_KEY");
+            string consumerSecret = Environment.GetEnvironmentVariable("SEMANTRIA_SECRET");
 
-            // A dictionary that keeps IDs of sent documents and their statuses. It's required to make sure that we get correct documents from the API.
+            // docsTracker keeps IDs of sent documents and their statuses.
+            // It's needed to match docs with their analysis results.
             Dictionary<string, TaskStatus> docsTracker = new Dictionary<string, TaskStatus>(4);
             List<string> initialTexts = new List<string>();
 
@@ -32,7 +33,7 @@ namespace DetailedModeTestApp
                 return;
             }
 
-            //Reads collection from the source file
+            // Read collection from the source file
             Console.WriteLine("Reading dataset from file...");
             using (StreamReader stream = new StreamReader(path))
             {
@@ -46,11 +47,7 @@ namespace DetailedModeTestApp
                 }
             }
 
-            // Creates JSON serializer instance
-			ISerializer serializer = new JsonSerializer();
-
-            // Initializes new session with the serializer object and the keys.
-            using (Session session = Session.CreateSession(consumerKey, consumerSecret, serializer))
+            using (Session session = Session.CreateSession(consumerKey, consumerSecret))
             {
                 // Error callback handler. This event will occur in case of server-side error
                 session.Error += new Session.ErrorHandler(delegate(object sender, ResponseErrorEventArgs ea)
@@ -58,9 +55,10 @@ namespace DetailedModeTestApp
                     Console.WriteLine(string.Format("{0}: {1}", (int)ea.Status, ea.Message));
                 });
 
-                //Obtaining subscription object to get user limits applicable on server side
+                // Get subscription object to get user limits
                 Subscription subscription = session.GetSubscription();
 
+                // Queue all docs to be analyzed
                 List<Document> outgoingBatch = new List<Document>(subscription.BasicSettings.IncomingBatchLimit);
                 IEnumerator<string> iterrator = initialTexts.GetEnumerator();
                 while (iterrator.MoveNext())
@@ -77,7 +75,7 @@ namespace DetailedModeTestApp
 
                     if (outgoingBatch.Count == subscription.BasicSettings.IncomingBatchLimit)
                     {
-                        // Queues batch of documents for processing on Semantria service
+                        // Queue batch of documents for processing on Semantria service
                         if (session.QueueBatchOfDocuments(outgoingBatch) != -1)
                         {
                             Console.WriteLine(string.Format("{0} documents queued successfully.", outgoingBatch.Count));
@@ -86,9 +84,9 @@ namespace DetailedModeTestApp
                     }
                 }
 
+                // Check for last batch, which may not be a full size batch.
                 if (outgoingBatch.Count > 0)
                 {
-                    // Queues batch of documents for processing on Semantria service
                     if (session.QueueBatchOfDocuments(outgoingBatch) != -1)
                     {
                         Console.WriteLine(string.Format("{0} documents queued successfully.", outgoingBatch.Count));
@@ -97,12 +95,14 @@ namespace DetailedModeTestApp
 
                 Console.WriteLine();
 
-                // As Semantria isn't real-time solution you need to wait some time before getting of the processed results
-                // In real application here can be implemented two separate jobs, one for queuing of source data another one for retreiving
-                // Wait ten seconds while Semantria process queued document
+                // Now, get the  results.
+                // In a real application you would typically implement two separate
+                // jobs, one for queuing docs to analyze and the other one for
+                // retreiving analysis results.
                 List<DocAnalyticData> results = new List<DocAnalyticData>();
                 while (docsTracker.Any(item => item.Value == TaskStatus.QUEUED))
                 {
+                    // Wait a bit between polling requests.
                     System.Threading.Thread.Sleep(500);
 
                     // Requests processed results from Semantria service
@@ -120,47 +120,59 @@ namespace DetailedModeTestApp
                 }
                 Console.WriteLine();
 
+                // Print sample of analysis results for each doc. (There's lots more in there!)
                 foreach (DocAnalyticData data in results)
                 {
-                    // Printing of document sentiment score
+                    // print document sentiment score
                     Console.WriteLine(string.Format("Document {0}. Sentiment score: {1}", data.Id, data.SentimentScore));
 
-                    // Printing of intentions
+                    // print intentions
                     if (data.Topics != null && data.Topics.Count > 0)
                     {
                         Console.WriteLine("Document topics:");
-                        foreach (Topic topic in data.Topics)
-                            Console.WriteLine(string.Format("\t{0} (type: {1}) (strength: {2})", topic.Title, topic.Type, topic.SentimentScore));
+                        foreach (Topic topic in data.Topics) {
+                            Console.WriteLine(string.Format("  {0} (type: {1}) (strength: {2})", topic.Title, topic.Type, topic.SentimentScore));
+                            foreach (SentimentMentionPhrase sentiment_phrase in topic.SentimentPhrases) {
+                                Console.WriteLine(string.Format("    sentiment phrase: {0} (type: {1}) (score: {2}) (negated: {3}) (negator: {4})",
+                                    sentiment_phrase.Phrase.Title, sentiment_phrase.Type, sentiment_phrase.SentimentScore,
+                                    sentiment_phrase.Phrase.IsNegated, sentiment_phrase.Phrase.Negator));
+                                foreach (MentionPhrase supporting_phrase in sentiment_phrase.SupportingPhrases) {
+                                    Console.WriteLine(string.Format("      supporting phrase: {0} (type: {1}) (word: {2}) (length: {3})",
+                                        supporting_phrase.Title, supporting_phrase.Type, supporting_phrase.Word, supporting_phrase.Length));
+                                }
+                            }
+                        }
                     }
 
-                    // Printing of intentions
+                    // print intentions
                     if (data.AutoCategories != null && data.AutoCategories.Count > 0)
                     {
                         Console.WriteLine("Document categories:");
                         foreach (Topic category in data.AutoCategories)
-                            Console.WriteLine(string.Format("\t{0} (strength: {1})", category.Title, category.StrengthScore));
+                            Console.WriteLine(string.Format("  {0} (strength: {1})", category.Title, category.StrengthScore));
                     }
 
-                    // Printing of document themes
+                    // print document themes
                     if (data.Themes != null && data.Themes.Count > 0)
                     {
                         Console.WriteLine("Document themes:");
                         foreach (DocTheme theme in data.Themes)
-                            Console.WriteLine(string.Format("\t{0} (sentiment: {1})", theme.Title, theme.SentimentScore));
+                            Console.WriteLine(string.Format("  {0} (sentiment: {1})", theme.Title, theme.SentimentScore));
                     }
 
-                    // Printing of document entities
+                    // print document entities
                     if (data.Entities != null && data.Entities.Count > 0)
                     {
                         Console.WriteLine("Entities:");
                         foreach (DocEntity entity in data.Entities)
-                            Console.WriteLine(string.Format("\t{0} : {1} (sentiment: {2})", entity.Title, entity.EntityType, entity.SentimentScore));
+                            Console.WriteLine(string.Format("  {0} : {1} (sentiment: {2})", entity.Title, entity.EntityType, entity.SentimentScore));
                     }
 
                     Console.WriteLine();
                 }
             }
 
+            Console.WriteLine("Hit any key to exit.");
             Console.ReadKey(false);
         }
     }

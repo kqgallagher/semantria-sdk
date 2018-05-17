@@ -1,11 +1,11 @@
 <?php
-require_once('../semantria/session.php');
+require_once('semantria/session.php');
 
 print("Semantria Collection processing mode demo.\n");
 
-// the consumer key and secret
-define('CONSUMER_KEY', "");
-define('CONSUMER_SECRET', "");
+// The consumer key and secret
+define('CONSUMER_KEY', getenv("SEMANTRIA_KEY"));
+define('CONSUMER_SECRET', getenv("SEMANTRIA_SECRET"));
 
 class SessionCallbackHandler extends \Semantria\CallbackHandler
 {
@@ -42,7 +42,7 @@ class SessionCallbackHandler extends \Semantria\CallbackHandler
 
 print("Reading collection from file...\n");
 $documents = array();
-$file = fopen("source.txt", "r");
+$file = fopen("bellagio-data-100.utf8", "r");
 if (!$file) {
     print("");
     exit(1);

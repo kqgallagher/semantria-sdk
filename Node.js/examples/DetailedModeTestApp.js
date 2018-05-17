@@ -1,18 +1,18 @@
 var SemantriaSession = require("../").Session;
 var promise = require('promise');
 var config = require('../test-config');
+var fs = require('fs');
+var path = require('path');
+
 try { config = require('../test-config.override') } catch(e) {}
 
-var consumerKey = config.consumerKey,
-	consumerSecret = config.consumerSecret,
-	appConfigurationId = false,
+var new_config = Object.assign({}, config);
+new_config.consumerKey = config.consumerKey || process.env.SEMANTRIA_KEY;
+new_config.consumerSecret = config.consumerSecret || process.env.SEMANTRIA_SECRET;
+var appConfigurationId = false,
 	appConfigurationName = "DetailedModeTestApp Configuration",
 	docsTracker = {},
-	SemantriaActiveSession = new SemantriaSession(consumerKey, consumerSecret, "myApp");
-
-if (config.apiHost) {
-	SemantriaActiveSession.API_HOST = config.apiHost
-}
+	SemantriaActiveSession = new SemantriaSession(new_config, "DetailedTest");
 
 console.log("Semantria Document processing mode demo.");
 
@@ -29,18 +29,18 @@ SemantriaActiveSession.getConfigurations(true)
 		is_primary: false,
 		auto_response: false,
 		language: "English"
-	}], true);
+	}]);
 })
 .then(function(result){
 	appConfigurationId = result[0].id;
 	return SemantriaActiveSession.getSubscription(true);
 })
 .then(function(subscription){
-	var outgoingBatches = getOutgoingBatches(subscription.basic_settings.batch_limit);
+	var outgoingBatches = getOutgoingBatches(subscription.basic_settings.incoming_batch_limit);
 	var requests = [];
 	for (var i=0; i<outgoingBatches.length; i++) {
 		(function(outgoingBatch){
-			var rq = SemantriaActiveSession.queueBatchOfDocuments(outgoingBatches[i], appConfigurationId, true)
+			var rq = SemantriaActiveSession.queueBatchOfDocuments(outgoingBatches[i], appConfigurationId)
 				.then(function(res){
 					console.log("%d documents queued successfully", outgoingBatch.length);
 				});
@@ -55,7 +55,7 @@ SemantriaActiveSession.getConfigurations(true)
 		var analyticData = [];
 		var wait_fn = function () {
 			console.log("Retrieving your processed results...");
-			SemantriaActiveSession.getProcessedDocuments(appConfigurationId, true)
+			SemantriaActiveSession.getProcessedDocuments(appConfigurationId)
 			.then(function(processedDocuments) {
 
 				if (processedDocuments && processedDocuments.length) {
@@ -123,17 +123,17 @@ SemantriaActiveSession.getConfigurations(true)
 
 })
 .catch(function(err) {
-	console.log("DetailedModeTestApp faild\n");
+	console.log("DetailedModeTestApp failed\n");
 	console.log(err);
 	console.log(err.stack);
 })
 .then(function() {
 	if (!appConfigurationId) return;
-	return SemantriaActiveSession.removeConfigurations([appConfigurationId], true);
+	return SemantriaActiveSession.removeConfigurations([appConfigurationId]);
 });
 
 function getOutgoingBatches(batch_limit) {
-	var initialTexts = require('./source.json');
+	var initialTexts = getTestDocuments();
 	var batch = [], batches = [];
 	for(var i=0, item; item=initialTexts[i]; i++) {
 		// Creates a sample document which need to be processed on Semantria
@@ -156,3 +156,10 @@ function getOutgoingBatches(batch_limit) {
 	return batches;
 }
 
+function getTestDocuments() {
+    var filename = path.resolve(__dirname, 'source.txt');
+    var lines = fs.readFileSync(filename, 'utf8').toString().split("\n");
+    // Filter out any empty or very short docs
+    lines = lines.filter(function(item) { return item.length > 3; });
+    return lines;
+}

@@ -1,8 +1,11 @@
 package com.semantria.auth;
 
+import com.google.common.base.Strings;
 import com.google.gson.Gson;
 import com.semantria.utils.AuthRequest;
 import com.semantria.utils.Utils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
@@ -12,16 +15,23 @@ import java.util.HashMap;
 import java.util.Map;
 
 public class AuthService {
-    private static final String authHost = "https://semantria.com";
+
+    private static Logger log = LoggerFactory.getLogger(AuthService.class);
+
+    private String authUrl = "https://semantria.com/auth";
     private static final String appKey = "cd954253-acaf-4dfa-a417-0a8cfb701f12";
 
-    private String cookieDir;
     private String key;
     private String secret;
-    private String cookieFileName = "session.dat";
+    private File cookieDir = null;
+    private String cookieFileName = "semantria-session.dat";
 
     public AuthService() {
-        this.cookieDir = System.getProperty("user.home");
+    }
+
+    public AuthService withAuthUrl(String value) {
+        authUrl = value;
+        return this;
     }
 
     public String getKey() {
@@ -32,16 +42,37 @@ public class AuthService {
         return secret;
     }
 
-    public void authWithUsernameAndPassword(String username, String password, boolean reuseExisting) throws CredentialException {
-        Map<String, String> cookie = reuseExisting ? this.loadCookieData() : null;
-        String requestData = this.getRequestData(username, password);
+    /**
+     * Attempt to authenticate using username/password. Does not consume an auth session.
+     * @throws CredentialException if username/password are invalid
+     */
+    public void authenticate(String username, String password) throws CredentialException {
+        String requestData = getRequestData(username, password);
+        String url = authUrl + "/session.json?appkey=" + appKey;
+        AuthRequest req = AuthRequest.getInstance(url, "POST").body(requestData);
+        req.doRequest();
+        if (req.getStatus() != 200) {
+            throw new CredentialException(req.getStatus(),
+                    "Authentication error: " + req.getMessageFromJsonErrorMessage("error_message"));
+        }
+    }
+
+    /**
+     * Attempt to create an auth session for username/password. If {@code reuseExisting} is true then will first
+     * try to use a pre-existing session if it's still valid. Otherwise this creates a new user session.
+     *
+     * @throws CredentialException if username/password are invalid
+     */
+    public void getSession(String username, String password, boolean reuseExisting) throws CredentialException {
+        String sessionId = reuseExisting ? loadCookieData(username) : null;
+        String requestData = getRequestData(username, password);
         AuthRequest req;
 
-        if (cookie != null && cookie.containsKey("credHash") && Utils.getHashCode(username + password).equals(cookie.get("credHash"))) {
-            String url = authHost + "/auth/session/" + cookie.get("id") +".json?appkey=" + this.appKey;
+        if (sessionId != null) {
+            String url = authUrl + "/session/" + sessionId +".json?appkey=" + appKey;
             req = AuthRequest.getInstance(url, "GET");
         } else {
-            String url = authHost + "/auth/session.json?appkey=" + this.appKey;
+            String url = authUrl + "/session.json?appkey=" + appKey;
             req = AuthRequest.getInstance(url, "POST").body(requestData);
         }
 
@@ -49,22 +80,22 @@ public class AuthService {
         if (req.getStatus() == 200) {
             Gson gson = new Gson();
             AuthSessionData sessionData = gson.fromJson(req.getResponse(), AuthSessionData.class);
-            String sessionId = sessionData.id;
-            this.key = sessionData.custom_params.get("key");
-            this.secret = sessionData.custom_params.get("secret");
-
-            this.saveCookieData(sessionId, username, password);
-        } else if (cookie != null && req.getStatus() == 404) {
+            sessionId = sessionData.id;
+            key = sessionData.custom_params.get("key");
+            secret = sessionData.custom_params.get("secret");
+            saveCookieData(sessionId, username);
+        } else if ((sessionId != null) && (req.getStatus() == 404)) {
             // Probably session expired, lets try again and create new one
-            this.authWithUsernameAndPassword(username, password, false);
+            getSession(username, password, false);
         } else {
-            this.removeCookieData();
-            throw new CredentialException("Provided username and password are incorrect");
+            removeCookieData();
+            throw new CredentialException(req.getStatus(),
+                    "Authentication error: " + req.getMessageFromJsonErrorMessage("error_message"));
         }
     }
 
     private String getRequestData(String username, String password) {
-        Map<String, String> requestDataMap = new HashMap<String, String>();
+        Map<String, String> requestDataMap = new HashMap<>();
         Gson gson = new Gson();
 
         requestDataMap.put("password", password);
@@ -77,57 +108,74 @@ public class AuthService {
         return gson.toJson(requestDataMap);
     }
 
-    private Map<String, String> loadCookieData() {
-        String fullPath = this.cookieDir + "/" + this.cookieFileName;
-        String sessionData = null;
-        File sessionFile = new File(fullPath);
-
-        try {
-            if (sessionFile.exists()) {
-                sessionData = new String(Files.readAllBytes(sessionFile.toPath()));
-            }
-        } catch (IOException e) {
-            // yes, we will ignore it. and yes, I'm ashamed
-        }
-
-        if (sessionData != null && !sessionData.isEmpty()) {
-            Gson gson = new Gson();
-            return gson.fromJson(sessionData, Map.class);
-        } else {
-            return null;
-        }
+    private boolean initializeCookieDir() {
+		if (cookieDir != null) return true;
+		if (maybeSetCookieDir(System.getProperty("user.home"))) return true;
+		if (maybeSetCookieDir(System.getProperty("semantria.session"))) return true;
+		if (maybeSetCookieDir("/tmp")) return true;
+		if (maybeSetCookieDir("/temp")) return true;
+		log.debug("No writeable directory found for session data. Will not cache session data.");
+        return false;
     }
 
-    private void saveCookieData(String sessionId, String username, String password) {
-        String fullPath = this.cookieDir + "/" + this.cookieFileName;
-        File sessionFile = new File(fullPath);
-        Gson gson = new Gson();
-        Map<String, String> sessionDataMap = new HashMap<String, String>();
+    private boolean maybeSetCookieDir(String name) {
+        if (name == null) {
+            return false;
+        }
+        File dir = new File(name);
+        if (dir.isDirectory() && dir.canWrite()) {
+			cookieDir = dir;
+			return true;
+		}
+		return false;
+    }
 
-        sessionDataMap.put("id", sessionId);
-        sessionDataMap.put("credHash", Utils.getHashCode(username + password));
-
-        String sessionData = gson.toJson(sessionDataMap);
-
+    private String loadCookieData(String username) {
+		if (! initializeCookieDir()) {
+			return null;
+		}
         try {
+            File sessionFile = new File(cookieDir, cookieFileName);
+            if (sessionFile.exists()) {
+                String sessionData = new String(Files.readAllBytes(sessionFile.toPath()));
+                if (Strings.isNullOrEmpty(sessionData)) {
+                    return null;
+                }
+                String[] parts = sessionData.split("\n");
+                if ((parts.length < 2) || (! username.equals(parts[0].trim()))) {
+                    return null;
+                }
+                return parts[1].trim();
+            }
+        } catch (IOException e) {
+			log.debug("Error reading session data", e);
+        }
+
+        return null;
+    }
+
+    private void saveCookieData(String sessionId, String username) {
+        if (! initializeCookieDir()) {
+            return;
+        }
+        try {
+            String sessionData = String.format("%s\n%s\n", username, sessionId);
+            File sessionFile = new File(cookieDir, cookieFileName);
             if (!sessionFile.exists()) {
                 sessionFile.createNewFile();
             }
-
             Files.write(sessionFile.toPath(), sessionData.getBytes(), StandardOpenOption.TRUNCATE_EXISTING);
         } catch (IOException e) {
-            // yes, we will ignore it. and yes, I'm ashamed
+            log.debug("Error writing session data", e);
         }
     }
 
     private void removeCookieData() {
-        String fullPath = this.cookieDir + "/" + this.cookieFileName;
-        File sessionFile = new File(fullPath);
-
         try {
+            File sessionFile = new File(cookieDir, cookieFileName);
             Files.deleteIfExists(sessionFile.toPath());
         } catch (IOException e) {
-            // yes, we will ignore it. and yes, I'm ashamed
+            log.debug("Error deleting session data", e);
         }
     }
 }

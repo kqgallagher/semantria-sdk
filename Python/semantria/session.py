@@ -19,20 +19,29 @@ from semantria.version import WRAPPER_VERSION
 
 
 class Session(object):
+
     host = 'https://api.semantria.com'
     wrapperName = 'Python/' + WRAPPER_VERSION
+    default_key_url='https://semantria.com/auth/session'
+    default_app_key='8f46c3c2-ca89-01aa-aad3-f437ea98cf7f'
 
-    _key_url = 'https://semantria.com/auth/session'
-    _app_key = '8f46c3c2-ca89-01aa-aad3-f437ea98cf7f'
+    def __init__(self, consumerKey=None, consumerSecret=None,
+                 serializer=None, applicationName=None, use_compression=False,
+                 username=None, password=None,
+                 session_file ='/tmp/semantria-session.dat',
+                 auth_key_url=default_key_url,
+                 auth_app_key=default_app_key):
 
-    def __init__(self, consumerKey, consumerSecret, serializer=None, applicationName=None, use_compression=False, username=None, password=None, session_file ='/tmp/session.dat'):
-        if consumerKey is None and consumerSecret is None:
-            consumerKey, consumerSecret = self.obtainKeys(username, password, session_file)
+        if username and password:
+            consumerKey, consumerSecret = self.obtainKeys(
+                username, password, session_file, auth_key_url, auth_app_key)
             if not consumerKey or not consumerSecret:
                 raise Exception('Cannot obtain Semantria keys. Wrong username or password.')
+
         self.consumerKey = consumerKey
         self.consumerSecret = consumerSecret
         self.use_compression = use_compression
+        self.http_headers = {}
 
         if applicationName:
             self.applicationName = '{0}/{1}'.format(applicationName, self.wrapperName)
@@ -41,11 +50,10 @@ class Session(object):
 
         if serializer:
             self.serializer = serializer
-            self.format = serializer.gettype()
         else:
             # set default json serializer
             self.serializer = JsonSerializer()
-            self.format = self.serializer.gettype()
+        self.format = self.serializer.gettype()
 
         self.applicationName = self.applicationName + "/" + self.format.upper()
 
@@ -53,8 +61,7 @@ class Session(object):
             self.consumerKey,
             self.consumerSecret,
             self.applicationName,
-            self.use_compression
-        )
+            self.use_compression)
 
         # Events
         self.Request = SessionEvent(self)
@@ -63,43 +70,78 @@ class Session(object):
         self.DocsAutoResponse = SessionEvent(self)
         self.CollsAutoResponse = SessionEvent(self)
 
-    def obtainKeys(self, username, password, session_file='/tmp/semantria-session.dat'):
+    def __repr__(self):
+        return ("{}({!r})".format(self.__class__.__name__, self.host))
+   
+
+    def obtainKeys(self, username, password,
+                   session_file='/tmp/semantria-session.dat',
+                   auth_key_url=default_key_url,
+                   auth_app_key=default_app_key):
         import requests
 
-        if os.path.exists(session_file):
-            with open(session_file) as f:
-                f.seek(0)
-                session_id = f.readline()
+        session_id = self.getSavedSessionId(session_file, username)
 
-            url = '{0}/{1}.json?appkey={2}'.format(self._key_url, session_id, self._app_key)
-            res = requests.get(url)
+        if session_id:
+            url = '{0}/{1}.json?appkey={2}'.format(auth_key_url, session_id, auth_app_key)
+            response = requests.get(url)
+            if response.status_code == 200:
+                json_data = response.json()
+                return json_data['custom_params']['key'], json_data['custom_params']['secret']
 
-            if res.status_code == 200:
-                json_res = res.json()
-                return json_res['custom_params']['key'], json_res['custom_params']['secret']
-
-        url = '{0}.json?appkey={1}'.format(self._key_url, self._app_key)
+        url = '{0}.json?appkey={1}'.format(auth_key_url, auth_app_key)
         data = {'username': username, 'password': password}
 
-        res = requests.post(url, data=json.dumps(data))
-        if res.status_code != 200:
+        response = requests.post(url, data=json.dumps(data))
+        if response.status_code != 200:
             return False, False
 
-        json_res = res.json()
-        session_id = json_res['id']
+        json_data = response.json()
+        self.saveSessionId(session_file, username, json_data['id'])
 
-        with open(session_file, 'w') as f:
+        return json_data['custom_params']['key'], json_data['custom_params']['secret']
+
+    # Cache session id in a simple two line format:
+    #   username
+    #   session id
+    def saveSessionId(self, session_file, username, session_id):
+        with open(session_file, mode='w') as f:
             f.seek(0)
+            f.write(username)
+            f.write('\n')
             f.write(session_id)
+            f.write('\n')
 
-        return json_res['custom_params']['key'], json_res['custom_params']['secret']
+    # Returns session id if a reasonable one is found
+    def getSavedSessionId(self, session_file, username):
+        if not os.path.exists(session_file):
+            return None
+        with open(session_file, mode='r') as f:
+            u = f.readline().strip()
+            if u != username:
+                return None
+            return f.readline().strip()
+                
 
     def registerSerializer(self, serializer):
-        if serializer:
-            self.serializer = serializer
-            self.format = serializer.gettype()
-        else:
-            raise SemantriaError('Parameter not found: %s' % serializer)
+        if not serializer:
+            raise SemantriaError('Parameter \'serializer\' must not be empty')
+        self.serializer = serializer
+        self.format = serializer.gettype()
+
+    # Sets an HTTP header for all new HTTP requests. If a header with
+    # the key already exists, overwrite its value with the new value.
+    # Any existing requests will not be affected.
+    # 
+    # NOTE: HTTP requires all request properties which can legally have
+    # multiple instances with the same key to use a comma-separated list
+    # syntax which enables multiple properties to be appended into a
+    # single property.
+    def setHttpHeader(self, key, value):
+        self.http_headers[key] = value
+
+    def setHttpHeaders(self, new_headers):
+        self.http_headers = new_headers.copy() if new_headers else {}
 
     def getApiVersion(self):
         return self._request.apiVersion
@@ -108,43 +150,41 @@ class Session(object):
         self._request.apiVersion = apiVersion
 
     def getStatus(self):
-        url = '{0}/status.{1}'.format(self.host, self.format)
+        url = self.makeUrl('/status')
         return self._runRequest("GET", url, "get_status")
 
-    def getSupportedFeatures(self, language):
-        url = '{0}/features.{1}'.format(self.host, self.format)
-        if language:
-            url = '{0}?language={1}'.format(url, language)
-
+    def getSupportedFeatures(self, language=None):
+        url = self.makeUrl('/features', params={'language': language})
         return self._runRequest("GET", url, "get_features")
 
     def getSubscription(self):
-        url = '{0}/subscription.{1}'.format(self.host, self.format)
+        url = self.makeUrl('/subscription')
         return self._runRequest("GET", url, "get_subscription")
 
-    def getStatistics(self, configId=None, interval=None):
-        """ Verify subscription responds with overall documents and system API calls balance
-
-        :param configId: Identifier of the specific configuration for usage statistics retrieving
-        :type configId: str
-        :param interval: Hour, Day, Week, Month, Year values are supported.
-        :type interval: str
-        :return: Semantria service statistics
-        :rtype: dict
+    def getStatistics(self, configId=None, interval=None, start=None, end=None,
+                      config_name=None, language=None, app=None, group=None):
+        """ Returns usage statistics
         """
-        url = '{0}/statistics.{1}'.format(self.host, self.format)
-        if configId:
-            url = '{0}?config_id={1}'.format(url, configId)
+        if not (interval or start or end):
+            raise SemantriaError('One of interval, start or end must be specified')
+        if interval and (interval.lower() not in ["hour", "day", "week", "month", "year"]):
+            raise SemantriaError('Unknown value for interval: {}. Expected hour, day, week, month or year'
+                                 .format(interval))
 
-        if configId and interval and interval.lower() in ["hour", "day", "week", "month", "year"]:
-            url = '{0}&interval={1}'.format(url, interval)
-        elif interval and interval in ["hour", "day", "week", "month", "year"]:
-            url = '{0}?interval={1}'.format(url, interval)
+        params = {'config_id': configId,
+                  'config_name': config_name,
+                  'interval': interval,
+                  'from': start,
+                  'to': end,
+                  'language': language,
+                  'app': app,
+                  'group': group} 
+        url = self.makeUrl('/statistics', params=params)
 
         return self._runRequest("GET", url, "get_statistics")
 
     def getConfigurations(self):
-        url = '{0}/configurations.{1}'.format(self.host, self.format)
+        url = self.makeUrl('/configurations')
         result = self._runRequest("GET", url, "get_configurations")
         if result is None:
             result = []
@@ -156,35 +196,28 @@ class Session(object):
     def updateConfigurations(self, items, create=False):
         if not isinstance(items, list):
             items = [items]
-
-        url = '{0}/configurations.{1}'.format(self.host, self.format)
-        wrapper = self._getTypeWrapper("update_configurations")
-        data = self.serializer.serialize(items, wrapper)
+        url = self.makeUrl('/configurations')
+        data = self.serializer.serialize(items)
         return self._runRequest(("POST" if create else "PUT"), url, None, data)
 
     def cloneConfiguration(self, name, template):
-        if name is None:
-            name = ''
-        items = [name, template]
-        return self.updateConfigurations(items)
+        if not name:
+            raise SemantriaError('Parameter \'name\' must not be empty')
+        items = {"name": name, "template": template}
+        return self.addConfigurations(items)
 
     def removeConfigurations(self, config_id):
-        url = '{0}/configurations.{1}'.format(self.host, self.format)
+        url = self.makeUrl('/configurations')
         data = []
         if not isinstance(config_id, list):
             data.append(config_id)
         else:
             data = config_id
-        wrapper = self._getTypeWrapper("delete_configurations")
-        data = self.serializer.serialize(data, wrapper)
+        data = self.serializer.serialize(data)
         return self._runRequest("DELETE", url=url, postData=data)
 
     def getBlacklist(self, config_id=None):
-        if config_id:
-            url = '{0}/blacklist.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/blacklist.{1}'.format(self.host, self.format)
-
+        url = self.makeUrl('/blacklist', config_id)
         result = self._runRequest("GET", url, "get_blacklist")
         if result is None:
             result = []
@@ -197,33 +230,20 @@ class Session(object):
         if not isinstance(items, list):
             items = [items]
 
-        if config_id:
-            url = '{0}/blacklist.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/blacklist.{1}'.format(self.host, self.format)
-
-        wrapper = self._getTypeWrapper("update_blacklist")
-        data = self.serializer.serialize(items, wrapper)
+        url = self.makeUrl('/blacklist', config_id)
+        data = self.serializer.serialize(items)
         return self._runRequest(("POST" if create else "PUT"), url=url, postData=data)
 
     def removeBlacklist(self, items, config_id=None):
         if not isinstance(items, list):
             items = [items]
 
-        if config_id:
-            url = '{0}/blacklist.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/blacklist.{1}'.format(self.host, self.format)
-        wrapper = self._getTypeWrapper("delete_from_blacklist")
-        data = self.serializer.serialize(items, wrapper)
+        url = self.makeUrl('/blacklist', config_id)
+        data = self.serializer.serialize(items)
         return self._runRequest("DELETE", url=url, postData=data)
 
     def getCategories(self, config_id=None):
-        if config_id:
-            url = '{0}/categories.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/categories.{1}'.format(self.host, self.format)
-
+        url = self.makeUrl('/categories', config_id)
         result = self._runRequest("GET", url, "get_categories")
         if result is None:
             result = []
@@ -236,33 +256,20 @@ class Session(object):
         if not isinstance(items, list):
             items = [items]
 
-        if config_id:
-            url = '{0}/categories.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/categories.{1}'.format(self.host, self.format)
-
-        wrapper = self._getTypeWrapper("update_categories")
-        data = self.serializer.serialize(items, wrapper)
+        url = self.makeUrl('/categories', config_id)
+        data = self.serializer.serialize(items)
         return self._runRequest(("POST" if create else "PUT"), url=url, postData=data)
 
     def removeCategories(self, items, config_id=None):
         if not isinstance(items, list):
             items = [items]
 
-        if config_id:
-            url = '{0}/categories.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/categories.{1}'.format(self.host, self.format)
-        wrapper = self._getTypeWrapper("delete_categories")
-        data = self.serializer.serialize(items, wrapper)
+        url = self.makeUrl('/categories', config_id)
+        data = self.serializer.serialize(items)
         return self._runRequest("DELETE", url=url, postData=data)
 
     def getQueries(self, config_id=None):
-        if config_id:
-            url = '{0}/queries.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/queries.{1}'.format(self.host, self.format)
-
+        url = self.makeUrl('/queries', config_id)
         result = self._runRequest("GET", url, "get_queries")
         if result is None:
             result = []
@@ -275,34 +282,20 @@ class Session(object):
         if not isinstance(items, list):
             items = [items]
 
-        if config_id:
-            url = '{0}/queries.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/queries.{1}'.format(self.host, self.format)
-
-        wrapper = self._getTypeWrapper("update_queries")
-        data = self.serializer.serialize(items, wrapper)
+        url = self.makeUrl('/queries', config_id)
+        data = self.serializer.serialize(items)
         return self._runRequest(("POST" if create else "PUT"), url=url, postData=data)
 
     def removeQueries(self, items, config_id=None):
         if not isinstance(items, list):
             items = [items]
 
-        if config_id:
-            url = '{0}/queries.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/queries.{1}'.format(self.host, self.format)
-
-        wrapper = self._getTypeWrapper("update_queries")
-        data = self.serializer.serialize(items, wrapper)
+        url = self.makeUrl('/queries', config_id)
+        data = self.serializer.serialize(items)
         return self._runRequest("DELETE", url=url, postData=data)
 
     def getPhrases(self, config_id=None):
-        if config_id:
-            url = '{0}/phrases.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/phrases.{1}'.format(self.host, self.format)
-
+        url = self.makeUrl('/phrases', config_id)
         result = self._runRequest("GET", url, "get_sentiment_phrases")
         if result is None:
             result = []
@@ -315,34 +308,20 @@ class Session(object):
         if not isinstance(items, list):
             items = [items]
 
-        if config_id:
-            url = '{0}/phrases.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/phrases.{1}'.format(self.host, self.format)
-
-        wrapper = self._getTypeWrapper("update_sentiment_phrases")
-        data = self.serializer.serialize(items, wrapper)
+        url = self.makeUrl('/phrases', config_id)
+        data = self.serializer.serialize(items)
         return self._runRequest(("POST" if create else "PUT"), url=url, postData=data)
 
     def removePhrases(self, items, config_id=None):
         if not isinstance(items, list):
             items = [items]
 
-        if config_id:
-            url = '{0}/phrases.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/phrases.{1}'.format(self.host, self.format)
-
-        wrapper = self._getTypeWrapper("delete_sentiment_phrases")
-        data = self.serializer.serialize(items, wrapper)
+        url = self.makeUrl('/phrases', config_id)
+        data = self.serializer.serialize(items)
         return self._runRequest("DELETE", url=url, postData=data)
 
     def getEntities(self, config_id=None):
-        if config_id:
-            url = '{0}/entities.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/entities.{1}'.format(self.host, self.format)
-
+        url = self.makeUrl('/entities', config_id)
         result = self._runRequest("GET", url, "get_entities")
         if result is None:
             result = []
@@ -355,34 +334,20 @@ class Session(object):
         if not isinstance(items, list):
             items = [items]
 
-        if config_id:
-            url = '{0}/entities.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/entities.{1}'.format(self.host, self.format)
-
-        wrapper = self._getTypeWrapper("update_entities")
-        data = self.serializer.serialize(items, wrapper)
+        url = self.makeUrl('/entities', config_id)
+        data = self.serializer.serialize(items)
         return self._runRequest(("POST" if create else "PUT"), url, None, data)
 
     def removeEntities(self, items, config_id=None):
         if not isinstance(items, list):
             items = [items]
 
-        if config_id:
-            url = '{0}/entities.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/entities.{1}'.format(self.host, self.format)
-
-        wrapper = self._getTypeWrapper("delete_entities")
-        data = self.serializer.serialize(items, wrapper)
+        url = self.makeUrl('/entities', config_id)
+        data = self.serializer.serialize(items)
         return self._runRequest("DELETE", url, None, data)
 
     def getTaxonomy(self, config_id=None):
-        if config_id:
-            url = '{0}/taxonomy.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/taxonomy.{1}'.format(self.host, self.format)
-
+        url = self.makeUrl('/taxonomy', config_id)
         result = self._runRequest("GET", url, "get_taxonomy")
         if result is None:
             result = []
@@ -395,36 +360,21 @@ class Session(object):
         if not isinstance(items, list):
             items = [items]
 
-        if config_id:
-            url = '{0}/taxonomy.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/taxonomy.{1}'.format(self.host, self.format)
-
-        wrapper = self._getTypeWrapper("update_taxonomy")
-        data = self.serializer.serialize(items, wrapper)
+        url = self.makeUrl('/taxonomy', config_id)
+        data = self.serializer.serialize(items)
         return self._runRequest(("POST" if create else "PUT"), url, None, data)
 
     def removeTaxonomy(self, items, config_id=None):
         if not isinstance(items, list):
             items = [items]
 
-        if config_id:
-            url = '{0}/taxonomy.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/taxonomy.{1}'.format(self.host, self.format)
-
-        wrapper = self._getTypeWrapper("delete_taxonomy")
-        data = self.serializer.serialize(items, wrapper)
+        url = self.makeUrl('/taxonomy', config_id)
+        data = self.serializer.serialize(items)
         return self._runRequest("DELETE", url, None, data)
 
     def queueDocument(self, task, config_id=None):
-        if config_id:
-            url = '{0}/document.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/document.{1}'.format(self.host, self.format)
-
-        wrapper = self._getTypeWrapper("queue_document")
-        data = self.serializer.serialize(task, wrapper)
+        url = self.makeUrl('/document', config_id)
+        data = self.serializer.serialize(task)
         result = self._runRequest("POST", url, "get_processed_documents", data)
         if result is not None and not isinstance(result, int):
             self.DocsAutoResponse(result)
@@ -433,13 +383,8 @@ class Session(object):
             return result
 
     def queueBatch(self, batch, config_id=None):
-        if config_id:
-            url = '{0}/document/batch.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/document/batch.{1}'.format(self.host, self.format)
-
-        wrapper = self._getTypeWrapper("queue_batch_documents")
-        data = self.serializer.serialize(batch, wrapper)
+        url = self.makeUrl('/document/batch', config_id)
+        data = self.serializer.serialize(batch)
 
         result = self._runRequest("POST", url, "get_processed_documents", data)
         if result is not None and not isinstance(result, int):
@@ -450,35 +395,20 @@ class Session(object):
 
     def getDocument(self, doc_id, config_id=None):
         if not doc_id:
-            raise SemantriaError('Parameter not found: %s' % doc_id)
-
+            raise SemantriaError('Parameter \'doc_id\' must not be empty')
         doc_id = url_quote(doc_id, safe='')
-
-        if config_id:
-            url = '{0}/document/{1}.{2}?config_id={3}'.format(self.host, doc_id, self.format, config_id)
-        else:
-            url = '{0}/document/{1}.{2}'.format(self.host, doc_id, self.format)
-
+        url = self.makeUrl('/document/{0}'.format(doc_id), config_id)
         return self._runRequest("GET", url, "get_document")
 
     def cancelDocument(self, doc_id, config_id=None):
         if not doc_id:
-            raise SemantriaError('Parameter not found: %s' % doc_id)
-
+            raise SemantriaError('Parameter \'doc_id\' must not be empty')
         doc_id = url_quote(doc_id, safe='')
-
-        if config_id:
-            url = '{0}/document/{1}.{2}?config_id={3}'.format(self.host, doc_id, self.format, config_id)
-        else:
-            url = '{0}/document/{1}.{2}'.format(self.host, doc_id, self.format)
-
+        url = self.makeUrl('/document/{0}'.format(doc_id), config_id)
         return self._runRequest("DELETE", url)
 
     def getProcessedDocuments(self, config_id=None):
-        if config_id:
-            url = '{0}/document/processed.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/document/processed.{1}'.format(self.host, self.format)
+        url = self.makeUrl('/document/processed', config_id)
 
         result = self._runRequest("GET", url, "get_processed_documents")
         if result is None:
@@ -486,7 +416,7 @@ class Session(object):
         return result
 
     def getProcessedDocumentsByJobId(self, job_id):
-        url = '{0}/document/processed.{1}?job_id={2}'.format(self.host, self.format, job_id)
+        url = self.makeUrl('/document/processed', params={'job_id': job_id})
 
         result = self._runRequest("GET", url, "get_processed_documents_by_job_id")
         if result is None:
@@ -494,13 +424,8 @@ class Session(object):
         return result
 
     def queueCollection(self, task, config_id=None):
-        if config_id:
-            url = '{0}/collection.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/collection.{1}'.format(self.host, self.format)
-
-        wrapper = self._getTypeWrapper("queue_collection")
-        data = self.serializer.serialize(task, wrapper)
+        url = self.makeUrl('/collection', config_id)
+        data = self.serializer.serialize(task)
         result = self._runRequest("POST", url, "get_processed_collections", data)
         if result is not None and not isinstance(result, int):
             self.CollsAutoResponse(result)
@@ -508,37 +433,22 @@ class Session(object):
         else:
             return result
 
-    def getCollection(self, coll_id, config_id=None):
-        if not coll_id:
-            raise SemantriaError('Parameter not found: %s' % coll_id)
-
-        coll_id = url_quote(coll_id, safe='')
-
-        if config_id:
-            url = '{0}/collection/{1}.{2}?config_id={3}'.format(self.host, coll_id, self.format, config_id)
-        else:
-            url = '{0}/collection/{1}.{2}'.format(self.host, coll_id, self.format)
-
+    def getCollection(self, collection_id, config_id=None):
+        if not collection_id:
+            raise SemantriaError('Parameter \'collection_id\' must not be empty')
+        collection_id = url_quote(collection_id, safe='')
+        url = self.makeUrl('/collection/{0}'.format(collection_id), config_id)
         return self._runRequest("GET", url, "get_collection")
 
-    def cancelCollection(self, coll_id, config_id=None):
-        if not coll_id:
-            raise SemantriaError('Parameter not found: %s' % coll_id)
-
-        coll_id = url_quote(coll_id, safe='')
-
-        if config_id:
-            url = '{0}/collection/{1}.{2}?config_id={3}'.format(self.host, coll_id, self.format, config_id)
-        else:
-            url = '{0}/collection/{1}.{2}'.format(self.host, coll_id, self.format)
-
+    def cancelCollection(self, collection_id, config_id=None):
+        if not collection_id:
+            raise SemantriaError('Parameter \'collection_id\' must not be empty')
+        collection_id = url_quote(collection_id, safe='')
+        url = self.makeUrl('/collection/{0}'.format(collection_id), config_id)
         return self._runRequest("DELETE", url)
 
     def getProcessedCollections(self, config_id=None):
-        if config_id:
-            url = '{0}/collection/processed.{1}?config_id={2}'.format(self.host, self.format, config_id)
-        else:
-            url = '{0}/collection/processed.{1}'.format(self.host, self.format)
+        url = self.makeUrl('/collection/processed', config_id)
 
         result = self._runRequest("GET", url, "get_processed_collections")
         if result is None:
@@ -546,74 +456,78 @@ class Session(object):
         return result
 
     def getProcessedCollectionsByJobId(self, job_id):
-        url = '{0}/collection/processed.{1}?job_id={2}'.format(self.host, self.format, job_id)
-
+        url = self.makeUrl('/collection/processed', params={'job_id': job_id})
         result = self._runRequest("GET", url, "get_processed_collections_by_job_id")
         if result is None:
             result = []
         return result
 
-    def _getTypeHandler(self, type_):
-        if self.serializer.gettype() == "json":
-            return None
-
-        #only for xml serializer
-        # if type_ == "get_status":
-        #     return GetStatusHandler()
-        # elif type_ == "get_subscription":
-        #     return GetSubscriptionHandler()
-        # elif type_ == "get_configurations":
-        #     return GetConfigurationsHandler()
-        # elif type_ == "get_blacklist":
-        #     return GetBlacklistHandler()
-        # elif type_ == "get_categories":
-        #     return GetCategoriesHandler()
-        # elif type_ == "get_queries":
-        #     return GetQueriesHandler()
-        # elif type_ == "get_sentiment_phrases":
-        #     return GetSentimentPhrasesHandler()
-        # elif type_ == "get_entities":
-        #     return GetEntitiesHandler()
-        # elif type_ == "get_document":
-        #     return GetDocumentHandler()
-        # elif type_ == "get_processed_documents":
-        #     return GetProcessedDocumentsHandler()
-        # elif type_ == "get_collection":
-        #     return GetCollectionHandler()
-        # elif type_ == "get_processed_collections":
-        #     return GetProcessedCollectionsHandler()
-        # else:
-        #     return None
-
-    def _getTypeWrapper(self, type_):
-        if self.serializer.gettype() == "json":
-            return None
-
-        #only for xml serializer
-        if type_ == "update_configurations":
-            return {"root": "configurations", "added": "configuration", "removed": "configuration"}
-        elif type_ == "update_blacklist":
-            return {"root": "blacklist", "added": "item", "removed": "item"}
-        elif type_ == "update_categories":
-            return {"root": "categories", "added": "category", "removed": "category", "samples": "sample"}
-        elif type_ == "update_queries":
-            return {"root": "queries", "added": "query", "removed": "query"}
-        elif type_ == "update_sentiment_phrases":
-            return {"root": "phrases", "added": "phrase", "removed": "phrase"}
-        elif type_ == "update_entities":
-            return {"root": "entities", "added": "entity", "removed": "entity"}
-        elif type_ == "queue_document":
-            return {"root": "document"}
-        elif type_ == "queue_batch_documents":
-            return {"root": "documents", "item": "document"}
-        elif type_ == "queue_collection":
-            return {"root": "collection", "documents": "document"}
+    # Gets the salience user data directory files for a config as a tar
+    # or zip archive. Writes the archive as a file if path is given
+    # otherwise returns a byte array. If there is an error getting the
+    # archive data, then any error handlers are called and this function
+    # returns the HTTP status. If there is an error writing the archive
+    # file then an exception is raised.
+    def getUserDirectory(self, config_id=None, path=None, format=None):
+        format = self.getArchiveFormat(path, format)
+        url = self.makeUrl('/salience/user-directory', config_id, format=format)
+        response = self._request.authWebRequest("GET", url, None,
+                                                headers=self.http_headers)
+        if not isSuccess(response['status']):
+            self._resolveError(response)
+            return response['status']
+        if path:
+            with open(path, mode='wb') as stream:
+                stream.write(response['data'])
+            return response['status']
         else:
-            return None
+            return response['data']
+
+    # Determines the archive format. If an unknown format is given or no
+    # format is given then use zip format. Format is determined first
+    # from the path (if given) then from the the format parameter.
+    def getArchiveFormat(self, path, format):
+        if path:
+            path_lower = path.lower()
+            if path_lower.endswith('.tar.gz'):
+                return 'tar.gz'
+            if path_lower.endswith('.tar'):
+                return 'tar'
+            if path_lower.endswith('.zip'):
+                return 'zip'
+        if format:
+            if format in ['tar.gz', 'tar', 'zip']:
+                return format
+            if format in ['.tar.gz', '.tar', '.zip']:
+                return format[1:]
+        # zip format is the default
+        return 'zip'
+
+
+    def makeUrl(self, path, config_id=None, params=None, format=None):
+        # allow null string to indicate no extra format extension on url
+        if format is None:
+            format = self.format
+        url = self.host + path
+        if format:
+            url += '.' + format
+        if params:
+            param_string = '&'.join(['{0}={1}'.format(k, params[k])
+                                     for k in params if params[k]])
+            if config_id:
+                if param_string:
+                    param_string += '&'
+                param_string += 'config_id={0}'.format(config_id)
+            url += '?{0}'.format(param_string)
+        elif config_id:
+            url += '?config_id={0}'.format(config_id)
+        return url
+
 
     def _runRequest(self, method, url, type_=None, postData=None):
         self.Request({"method": method, "url": url, "message": postData})
-        response = self._request.authWebRequest(method, url, postData)
+        response = self._request.authWebRequest(method, url, postData,
+                                                headers=self.http_headers)
         self.Response({
             "status": response["status"],
             "reason": response["reason"],
@@ -627,23 +541,26 @@ class Session(object):
             message = response["data"]
 
         if method == "DELETE":
-            if status == 200 or status == 202:
+            if isSuccess(status):
                 return status
             else:
-                self._resolveError(status, message)
+                self._resolveError(response)
                 return status
         else:
             if status == 200:
-                handler = self._getTypeHandler(type_)
-                message = self.serializer.deserialize(response["data"], handler)
-                return message
+                return self.serializer.deserialize(response["data"])
             elif status == 202:
                 return status if method == "POST" else None
             else:
-                self._resolveError(status, message)
+                self._resolveError(response)
 
-    def _resolveError(self, status, message=None):
-        if status == 400 or status == 401 or status == 402 or status == 403 or status == 406 or status == 500:
+    def _resolveError(self, response):
+        status = response["status"]
+        if response["data"]:
+            message = '{}: {}'.format(response["reason"], response["data"])
+        else:
+            message = response["reason"]
+        if status in [400, 401, 402, 403, 406, 500]:
             self.Error({"status": status, "message": message})
         else:
             raise httplib.HTTPException(status, message)
@@ -654,6 +571,9 @@ class SessionEvent:
         self.handlers = set()
         self.sender = sender 
 
+    def __repr__(self):
+        return ("{}({!r})".format(self.__class__.__name__, self.handlers))
+   
     def handle(self, handler): 
         self.handlers.add(handler) 
         return self 
@@ -676,3 +596,14 @@ class SessionEvent:
     __isub__ = unhandle 
     __call__ = fire 
     __len__ = getHandlerCount
+
+
+def isSuccess(status):
+    try:
+        code = int(status)
+        return ((code >= 200) and (code < 300))
+    except:
+        sys.stderr.write("ERROR: Bad status from request: {}. {}\n".format(status, sys.exc_info()))
+        traceback.print_tb(sys.exc_info()[2])
+        sys.stderr.write("\n")
+        return False

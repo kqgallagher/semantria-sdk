@@ -3,7 +3,6 @@ using System.IO;
 using System.Collections.Generic;
 
 using Semantria.Com;
-using Semantria.Com.Serializers;
 using Semantria.Com.Mapping;
 using Semantria.Com.Mapping.Output;
 
@@ -16,9 +15,10 @@ namespace JobIdFeatureTestApp
     {
         static void Main(string[] args)
         {
-            // Use correct Semantria API credentias here
-            string consumerKey = string.Empty;
-            string consumerSecret = string.Empty;
+            // Set environment vars before calling this program
+            // or edit this file and put your key and secret here.
+            string consumerKey = Environment.GetEnvironmentVariable("SEMANTRIA_KEY");
+            string consumerSecret = Environment.GetEnvironmentVariable("SEMANTRIA_SECRET");
 
             // null - send every single document separately
             // false - send uniqueJobIdCount batches
@@ -38,7 +38,7 @@ namespace JobIdFeatureTestApp
                 return;
             }
 
-            //Generates N unique jobId values
+            // Generate N unique jobId values
             for (int index = 0; index < uniqueJobIdCount; index++)
             {
                 string id = Guid.NewGuid().ToString();
@@ -47,7 +47,7 @@ namespace JobIdFeatureTestApp
                 documents.Add(id, new List<Document>());
             }
 
-            //Reads documents from the source file
+            // Read documents from the source file
             Console.WriteLine("Reading documents from file...");
             Console.WriteLine();
             using (StreamReader stream = new StreamReader(path))
@@ -74,11 +74,7 @@ namespace JobIdFeatureTestApp
                 }
             }
 
-            // Creates JSON serializer instance
-			ISerializer serializer = new JsonSerializer();
-
-            // Initializes new session with the serializer object and the keys.
-            using (Session session = Session.CreateSession(consumerKey, consumerSecret, serializer))
+            using (Session session = Session.CreateSession(consumerKey, consumerSecret))
             {
                 // Error callback handler. This event will occur in case of server-side error
                 session.Error += new Session.ErrorHandler(delegate(object sender, ResponseErrorEventArgs ea)
@@ -155,6 +151,7 @@ namespace JobIdFeatureTestApp
 
             Console.WriteLine();
             Console.WriteLine("Done!");
+            Console.WriteLine("Hit any key to exit.");
             Console.ReadKey(false);
         }
     }

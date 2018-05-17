@@ -1,13 +1,10 @@
 package com.semantria.mapping.configuration;
 
-import com.google.gson.annotations.SerializedName;
-
 import javax.xml.bind.annotation.XmlElement;
 import java.sql.Timestamp;
 
-public final class Configuration
+public class Configuration
 {
-	@SerializedName("config_id")
 	private String id = null;
     private String name = null;
     private String language = null;

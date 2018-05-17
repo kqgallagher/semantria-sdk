@@ -1,5 +1,13 @@
 package com.semantria.utils;
 
+import com.google.common.base.Joiner;
+import com.google.common.base.Strings;
+import com.google.gson.Gson;
+import com.semantria.mapping.output.statistics.StatsInterval;
+import com.google.common.base.MoreObjects;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import javax.net.ssl.*;
@@ -7,17 +15,19 @@ import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Random;
+import java.util.*;
 import java.util.zip.GZIPInputStream;
 
 
-public final class AuthRequest
-{
+public class AuthRequest {
+
+	private static Logger log = LoggerFactory.getLogger(AuthRequest.class);
+
 	private String method = "GET";
 	private String url = "";
 	private HashMap<String, String> params = null;
@@ -25,332 +35,395 @@ public final class AuthRequest
 	private Integer status = 0;
 	private String key = "";
 	private String secret = "";
-	private String response = "";
-	private String rurl = "";
-	private String appName = "Java/4.2.92/";
-    private String apiVersion = "";
+	private boolean isBinaryResponse = false;
+	private String responseString = "";
+	private byte[] responseData = null;
+	private String appName = "Java/4.2.104/";
+	private String apiVersion = "";
 	private String errorMsg = null;
-    private boolean useCompression = false;
-    private int CONNECTION_TIMEOUT = 120000;
+	private boolean useCompression = false;
+	private Map<String, String> httpHeaders = new HashMap<>();
+	final private int CONNECTION_TIMEOUT = 120000;
 
-    public static AuthRequest getInstance(String url, String method) {
-        AuthRequest result = new AuthRequest(url, method);
-        return result;
-    }
 
-    private AuthRequest(String url, String method) {
-        this.url = url;
-        this.method = method;
+	public static AuthRequest getInstance(String url, String method) {
+		return new AuthRequest(url, method);
+	}
 
-        this.params = new HashMap<String, String>();
-    }
-
-    public AuthRequest key(String key) {
-        this.key = key;
-        return this;
-    }
-
-    public AuthRequest secret(String secret) {
-        this.secret = hashMD5(secret);
-        return this;
-    }
-
-    public AuthRequest body(String body) {
-        if (body != null) {
-            this.body = body;
+	private AuthRequest(String url, String method) {
+        if (method != null) {
+            method = method.toUpperCase();
         }
-        return this;
-    }
+		this.url = url;
+		this.method = method;
+		this.params = new HashMap<String, String>();
+	}
 
-    public AuthRequest config_id(String config_id) {
-        this.setParam("config_id", config_id);
-        return this;
-    }
+	public AuthRequest key(String key) {
+		this.key = key;
+		return this;
+	}
 
-    private void setParam(String key, String value) {
-        if (value != null) {
-            this.params.put(key, value);
-        } else if (this.params.containsKey(key)) {
-            this.params.remove(key);
-        }
-    }
+	public AuthRequest secret(String secret) {
+		try {
+			this.secret = hashMD5(secret);
+		} catch (NoSuchAlgorithmException e) {
+			throw new RuntimeException("Can't create hash from secret", e);
+		}
+		return this;
+	}
 
-    public AuthRequest interval(String interval) {
-        this.setParam("interval", interval);
-        return this;
-    }
+	public AuthRequest body(String body) {
+		if (body != null) {
+			this.body = body;
+		}
+		return this;
+	}
 
-    public AuthRequest job_id(String job_id) {
-        this.setParam("job_id", job_id);
-        return this;
-    }
+	/**
+	 * Sets request to return binary data rather than string.
+	 */
+	public AuthRequest binary() {
+		isBinaryResponse = true;
+		return this;
+	}
 
-    public AuthRequest language(String language) {
-        this.setParam("language", language);
-        return this;
-    }
+	public AuthRequest config_id(String config_id) {
+		this.setParam("config_id", config_id);
+		return this;
+	}
 
-    public AuthRequest useCompression(boolean useCompression) {
-        this.useCompression = useCompression;
-        return this;
-    }
+	public AuthRequest headers(Map<String, String> headers) {
+		httpHeaders.putAll(headers);
+		return this;
+	}
 
-    public AuthRequest appName(String appName) {
-        if (appName == null) {
-            appName = "";
-        }
-        String prefix = this.url.contains("json") ? "JSON" : "XML";
-        this.appName = appName + "/" + this.appName + prefix;
-        return this;
-    }
+	private void setParam(String key, String value) {
+		if (value == null) {
+			this.params.remove(key);
+		} else {
+			this.params.put(key, value);
+		}
+	}
 
-    public AuthRequest apiVersion(String apiVersion) {
-        this.apiVersion = apiVersion;
-        return this;
-    }
-	
-	public Integer doRequest()
-	{
-		try
-		{
+	public AuthRequest interval(StatsInterval interval) {
+		if (interval != null) {
+			this.setParam("interval", interval.name());
+		}
+		return this;
+	}
+
+	public AuthRequest groupBy(String groupBy) {
+		this.setParam("group", groupBy);
+		return this;
+	}
+
+	public AuthRequest from(String from) {
+		this.setParam("from", from);
+		return this;
+	}
+
+	public AuthRequest to(String to) {
+		this.setParam("to", to);
+		return this;
+	}
+
+	public AuthRequest job_id(String job_id) {
+		this.setParam("job_id", job_id);
+		return this;
+	}
+
+	public AuthRequest language(String language) {
+		this.setParam("language", language);
+		return this;
+	}
+
+	public AuthRequest useCompression(boolean useCompression) {
+		this.useCompression = useCompression;
+		return this;
+	}
+
+	public AuthRequest appName(String appName) {
+		if (appName == null) {
+			appName = "";
+		}
+		String type = this.url.contains("json") ? "JSON" : "XML";
+		this.appName = appName + "/" + this.appName + type;
+		return this;
+	}
+
+	public AuthRequest apiVersion(String apiVersion) {
+		this.apiVersion = apiVersion;
+		return this;
+	}
+
+	public String getMethod() {
+		return method;
+	}
+
+	public Integer doRequest() {
+		HttpURLConnection conn = null;
+		try {
+			responseString = null;
+			errorMsg = null;
 			initSSLContext();
-			HttpURLConnection conn = getOAuthSignedConnection();
-            conn.setConnectTimeout(CONNECTION_TIMEOUT);
-        	conn.connect();
-        	sendRequestBodyIfSetted(conn);
-        	receiveResponseFromServer(conn);
-	        status = conn.getResponseCode();
-
-			if( status < 202 )
-			{
-				errorMsg = null;
+			conn = getOAuthSignedConnection();
+			conn.setConnectTimeout(CONNECTION_TIMEOUT);
+			conn.connect();
+			sendRequestBodyIfSet(conn);
+			status = conn.getResponseCode();
+			log.trace("status: {}", status);
+			receiveResponseFromServer(conn);
+		} catch (Exception e) {
+			log.error("Error performing request. {} {}, params: {}",
+					method, url,
+					((params == null) ? null : Joiner.on(",").withKeyValueSeparator(":").join(params)),
+					e);
+		} finally {
+			if (conn != null) {
+				conn.disconnect();
 			}
-			conn.disconnect();
 		}
-		catch(Exception e)
-		{
-			System.out.println(e);
-			e.printStackTrace();
-		}
+
 		return status;
 	}
-	
+
 	private void initSSLContext() throws java.security.GeneralSecurityException {
 		SSLContext ctx = SSLContext.getInstance("TLS");
-		ctx.init(new KeyManager[0], new TrustManager[] {new DefaultTrustManager()}, new SecureRandom());
+		ctx.init(new KeyManager[0], new TrustManager[]{new DefaultTrustManager()}, new SecureRandom());
 		SSLContext.setDefault(ctx);
 	}
-	
-	private HttpURLConnection getOAuthSignedConnection() throws IOException {
+
+	public String getFullUrl() {
+		if (params.isEmpty()) {
+			return url;
+		} else {
+			return url + "?" + buildRequest(params);
+		}
+	}
+
+	private HttpURLConnection getOAuthSignedConnection() throws IOException, NoSuchAlgorithmException, InvalidKeyException {
 		setOAuthParameters();
 
-		rurl = this.url + (!params.isEmpty() ? ("?" + buildRequest(params)) : "");
-		URL url = new URL(rurl);
-        HttpURLConnection conn = null;
-        if (this.url.startsWith("https")) {
-            conn = (HttpsURLConnection) url.openConnection();
-            ((HttpsURLConnection)conn).setHostnameVerifier(new HostnameVerifier() {
-                @Override
-                public boolean verify(String arg0, SSLSession arg1) {
-                    return true;
-                }
-            });
-        } else {
-            conn = (HttpURLConnection) url.openConnection();
-        }
+		String fullUrl = getFullUrl();
+		URL urlObj = new URL(fullUrl);
+		HttpURLConnection conn = null;
+		if (this.url.startsWith("https")) {
+			conn = (HttpsURLConnection) urlObj.openConnection();
+			((HttpsURLConnection) conn).setHostnameVerifier(new HostnameVerifier() {
+				@Override
+				public boolean verify(String arg0, SSLSession arg1) {
+					return true;
+				}
+			});
+		} else {
+			conn = (HttpURLConnection) urlObj.openConnection();
+		}
 
-        setRequestProperties(conn);
-    	
-    	return conn;
+		setRequestProperties(conn, fullUrl);
+
+		return conn;
 	}
-	
+
 	private void setOAuthParameters() {
-        if (!key.isEmpty()) {
-            if(params == null) { params = new HashMap<String, String>(); }
-            params.put("oauth_nonce", Long.toString(new Random().nextLong()&0xffffffffL));
-            params.put("oauth_consumer_key", key);
-            params.put("oauth_signature_method", "HMAC-SHA1");
-            params.put("oauth_timestamp", Long.toString(System.currentTimeMillis()/1000));
-            params.put("oauth_version", "1.0");
-        }
+		if (!key.isEmpty()) {
+			if (params == null) {
+				params = new HashMap<String, String>();
+			}
+			params.put("oauth_nonce", Long.toString(new Random().nextLong() & 0xffffffffL));
+			params.put("oauth_consumer_key", key);
+			params.put("oauth_signature_method", "HMAC-SHA1");
+			params.put("oauth_timestamp", Long.toString(System.currentTimeMillis() / 1000));
+			params.put("oauth_version", "1.0");
+		}
 	}
-	
-	private void setRequestProperties(HttpURLConnection conn) throws IOException {
+
+	private void setRequestProperties(HttpURLConnection conn, String fullUrl) throws IOException, InvalidKeyException, NoSuchAlgorithmException {
+		for (Map.Entry<String, String> entry : httpHeaders.entrySet()) {
+			conn.setRequestProperty(entry.getKey(), entry.getValue());
+		}
+
 		conn.setRequestProperty("Connection", "close");
 		conn.setDoOutput(true);
-    	conn.setRequestMethod(method);
+		conn.setRequestMethod(method);
 
-		if( method.equals("GET") && useCompression == true )
-		{
-			conn.setRequestProperty("Accept-Encoding","gzip,deflate");
-		};
-
-        if (!key.isEmpty() && !secret.isEmpty()) {
-		    conn.setRequestProperty("Authorization", "OAuth,oauth_consumer_key=\"" + key + "\",oauth_signature=\""
-    					+ URLEncoder.encode(signupRequest(rurl, secret), "UTF-8") + "\"");
-        }
+		if (method.equals("GET") && useCompression) {
+			conn.setRequestProperty("Accept-Encoding", "gzip,deflate");
+		}
+		if (!key.isEmpty() && !secret.isEmpty()) {
+			conn.setRequestProperty("Authorization", getAuthorizationHeader(fullUrl));
+		}
 		conn.setRequestProperty("x-app-name", appName);
-		conn.setRequestProperty("x-api-version", apiVersion);
-	}
-	
-	private void sendRequestBodyIfSetted(HttpURLConnection conn) throws IOException {
-		if (null != body) {
-            OutputStream out = conn.getOutputStream();
-            out.write(body.getBytes("UTF-8"));
-            out.close();
+		if (! Strings.isNullOrEmpty(apiVersion)) {
+			conn.setRequestProperty("x-api-version", apiVersion);
 		}
 	}
-	
+
+	public String getAuthorizationHeader(String fullUrl) throws UnsupportedEncodingException, NoSuchAlgorithmException, InvalidKeyException {
+		return String.format("OAuth,oauth_consumer_key=\"%s\",oauth_signature=\"%s\"",
+				key, URLEncoder.encode(signRequest(fullUrl, secret), "UTF-8"));
+	}
+
+	private void sendRequestBodyIfSet(HttpURLConnection conn) throws IOException {
+		if (null != body) {
+			OutputStream out = conn.getOutputStream();
+			out.write(body.getBytes("UTF-8"));
+			out.close();
+		}
+	}
+
 	private void receiveResponseFromServer(HttpURLConnection conn) throws IOException {
-		byte[] data = null;
+		int status = conn.getResponseCode();
+		if ((status >= 200) && (status < 300)) {
+            receiveSuccessResponseFromServer(conn);
+        } else {
+            receiveErrorResponseFromServer(conn);
+        }
+    }
 
-		try
-		{
+	private void receiveSuccessResponseFromServer(HttpURLConnection conn) throws IOException {
+		try {
 			String gzip = conn.getRequestProperty("Accept-Encoding");
-			if( gzip != null && gzip.contains("gzip") )
-			{
+			if (gzip != null && gzip.contains("gzip")) {
 				InputStream stream = conn.getInputStream();
-				if( stream != null && stream.available() > 0 )
-				{
-					BufferedReader reader = null;
-					try
-					{
-						GZIPInputStream gzipStream =  new GZIPInputStream(stream);
-						Reader decoder = new InputStreamReader(gzipStream, "UTF-8");
-						reader = new BufferedReader(decoder);
-						String text = null;
-						String res = "";
-						while ((text = reader.readLine()) != null)
-						{
-							res += text;
-						}
-
-						response = res;
-					}
-					catch (Exception e)
-					{
-						throw e;
-					}
-					finally
-					{
-						if( reader != null )
-						{
-							reader.close();
-						}
+				if (stream != null && stream.available() > 0) {
+					GZIPInputStream gzipStream = new GZIPInputStream(stream);
+					responseData = getBytesFromInputStream(gzipStream);
+					if ((responseData != null) && !isBinaryResponse) {
+						responseString = new String(responseData, "UTF-8");
 					}
 				}
-			}
-			else
-			{
-				data = getBytesFromInputStream(conn.getInputStream());
-				if( data != null )
-				{
-					response = new String(data, "UTF-8");
+			} else {
+				responseData = getBytesFromInputStream(conn.getInputStream());
+				if ((responseData != null) && !isBinaryResponse) {
+					responseString = new String(responseData, "UTF-8");
 				}
-
 			}
+		} catch (IOException e) {
+			log.error("Error reading success response from server", e);
+			responseData = null;
+			responseString = "";
+			errorMsg = "Error reading success response from server: " + e.getMessage();
+			throw e;
         }
-		catch(Exception e)
-		{
-        	try {
-        		data = getBytesFromInputStream(conn.getErrorStream());
-		        if( data != null )
-		        {
-			        errorMsg = new String(data, "UTF-8");
-			        errorMsg = new String(data, "UTF-8");
-		        }
-        	} catch(Exception ex) {}
-        }
+    }
+    
+	private void receiveErrorResponseFromServer(HttpURLConnection conn) throws IOException {
+		try {
+			responseData = getBytesFromInputStream(conn.getErrorStream());
+			if (responseData != null) {
+				errorMsg = new String(responseData, "UTF-8");
+			}
+		} catch (IOException e) {
+			log.error("Error reading error response from server", e);
+			responseData = null;
+			responseString = "";
+			errorMsg = "Error reading error response from server: " + e.getMessage();
+			throw e;
+		}
 	}
-	
+
 	private byte[] getBytesFromInputStream(InputStream is) throws IOException {
-		int len;
-	    int size = 1024;
-	    byte[] result;
-
-	    if (is instanceof ByteArrayInputStream) {
-	    	size = is.available();
-	    	result = new byte[size];
-	    	len = is.read(result, 0, size);
-	    } else {
-	    	ByteArrayOutputStream bos = new ByteArrayOutputStream();
-	    	result = new byte[size];
-	    	while ((len = is.read(result, 0, size)) != -1) {
-	    		bos.write(result, 0, len);
-	    	}
-	    	result = bos.toByteArray();
-	    }
-	    
-	    is.close();
-	    
-	    return result;
+		byte[] result;
+		if (is instanceof ByteArrayInputStream) {
+			int size = is.available();
+			log.trace("Reading {} bytes from {}", size, is);
+			result = new byte[size];
+			int len = is.read(result, 0, size);
+			log.trace("Done. Read {} bytes from {}", len, is);
+		} else {
+			log.trace("Reading from {}", is);
+			ByteArrayOutputStream bos = new ByteArrayOutputStream();
+			int size = 2048;
+			result = new byte[size];
+			int total = 0, len;
+			while ((len = is.read(result, 0, size)) != -1) {
+				bos.write(result, 0, len);
+				total += len;
+				log.trace("Read {} bytes so far from {}", total, is);
+			}
+			result = bos.toByteArray();
+			log.trace("Done. Read {} bytes from {}", total, is);
+		}
+		is.close();
+		return result;
 	}
 
-	public String getResponse() { return response; }
-	
-	private String buildRequest(HashMap<String, String> map)
-	{
+	public String getResponse() {
+		return responseString;
+	}
+
+	public byte[] getResponseData() {
+		return responseData;
+	}
+
+	private String buildRequest(HashMap<String, String> map) {
 		String request = "";
 		Iterator<String> iterator = map.keySet().iterator();
-	    Integer i = 0;
-		while (iterator.hasNext())
-	    {
-	    	String key = iterator.next();
-	    	request = request.concat(key + "=" + map.get(key));
-	    	if( i < map.size() - 1){ request = request.concat("&"); }
-	    	i++;
-	    }
+		Integer i = 0;
+		while (iterator.hasNext()) {
+			String key = iterator.next();
+			request = request.concat(key + "=" + map.get(key));
+			if (i < map.size() - 1) {
+				request = request.concat("&");
+			}
+			i++;
+		}
 		return request;
 	}
-	
-	private String signupRequest(String rurl, String secretkey)
-	{
-		String signature = "";
-		try
-		{
-			String encodedURL = URLEncoder.encode(rurl, "UTF-8");
-			Mac mac = Mac.getInstance("HmacSHA1");
-			SecretKeySpec secret = new SecretKeySpec(secretkey.getBytes(),"HmacSHA1");
-			mac.init(secret);
-			byte[] digest = mac.doFinal(encodedURL.getBytes());
-			signature = new sun.misc.BASE64Encoder().encode(digest);
-		}
-		catch(Exception e)
-		{
-			System.out.println(e);
-		}
-	    
+
+	private String signRequest(String fullUrl, String secretkey) throws UnsupportedEncodingException, NoSuchAlgorithmException, InvalidKeyException {
+		String encodedURL = URLEncoder.encode(fullUrl, "UTF-8");
+		Mac mac = Mac.getInstance("HmacSHA1");
+		SecretKeySpec secret = new SecretKeySpec(secretkey.getBytes(), "HmacSHA1");
+		mac.init(secret);
+		byte[] digest = mac.doFinal(encodedURL.getBytes());
+		String signature = java.util.Base64.getEncoder().encodeToString(digest);
 		return signature;
 	}
-	
-	private String hashMD5(String md5)
-	{
-		try {
-	        java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
-	        byte[] array = md.digest(md5.getBytes());
-	        StringBuffer sb = new StringBuffer();
-	        for (int i = 0; i < array.length; ++i) {
-	          sb.append(Integer.toHexString((array[i] & 0xFF) | 0x100).substring(1,3));
-	       }
-	        return sb.toString();
-	    } catch (java.security.NoSuchAlgorithmException e) {
-	    }
-	    return null;
-	}
-	
-	public String getRequestUrl()
-	{
-		return rurl;
+
+	private String hashMD5(String md5) throws NoSuchAlgorithmException {
+		java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+		byte[] array = md.digest(md5.getBytes());
+		StringBuilder sb = new StringBuilder();
+		for (int i = 0; i < array.length; ++i) {
+			sb.append(Integer.toHexString((array[i] & 0xFF) | 0x100).substring(1, 3));
+		}
+		return sb.toString();
 	}
 
-	public String getErrorMessage()
-	{
+	public String getRequestUrl() {
+		return url;
+	}
+
+	public String getErrorMessage() {
 		return errorMsg;
 	}
 
-    public Integer getStatus() {
-        return status;
-    }
+	public Integer getStatus() {
+		return status;
+	}
+
+	public String getMessageFromJsonErrorMessage(String key) {
+		Map<String,Object> map = new Gson().fromJson(errorMsg, Map.class);
+		if (map.containsKey(key)) {
+			return (String) map.get(key);
+		} else {
+			return errorMsg;
+		}
+	}
+
+	@Override
+	public String toString() {
+		return MoreObjects.toStringHelper(this)
+				.omitNullValues()
+				.add("method", method)
+				.add("url", url)
+				.add("status", status)
+				.add("errorMsg", errorMsg)
+				.toString();
+	}
+
 }
 
 class DefaultTrustManager implements X509TrustManager {
